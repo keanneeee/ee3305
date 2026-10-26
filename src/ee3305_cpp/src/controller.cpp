@@ -3,6 +3,7 @@
 #include <memory>
 #include <chrono>
 #include <vector>
+#include <cmath>
 
 #include "rclcpp/rclcpp.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
@@ -70,14 +71,28 @@ namespace ee3305
             this->max_ang_vel_ = this->get_parameter("max_ang_vel").get_value<double>();
 
             // Handles: Topic Subscribers
-            // !TODO: path subscriber
+            // path subscriber
+            this->sub_path_ = this->create_subscription<nav_msgs::msg::Path>(
+                "path",
+                10,
+                std::bind(&Controller::callbackSubPath_, this, std::placeholders::_1));
 
-            // !TODO: odometry subscriber
+            // odometry subscriber
+            this->sub_odom_ = this->create_subscription<nav_msgs::msg::Odometry>(
+                "odom",
+                10,
+                std::bind(&Controller::callbackSubOdom_, this, std::placeholders::_1));
 
             // Handles: Topic Publishers
-            // !TODO: command velocities publisher
+            // command velocities publisher
+            this->pub_cmd_vel_ = this->create_publisher<geometry_msgs::msg::TwistStamped>(
+                "cmd_vel",
+                10);
 
-            // !TODO: lookahead point publisher
+            // lookahead point publisher
+            this->pub_lookahead_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
+                "lookahead",
+                10);
 
             // Handles: Timers
             this->timer_ = this->create_wall_timer(
@@ -100,8 +115,8 @@ namespace ee3305
                 return; // do not update the path if no path is returned. This will ensure the copied path contains at least one point when the first non-empty path is received.
             }
 
-            // !TODO: copy the array from the path
-            this->path_poses_ = {};
+            // copy the array from the path
+            this->path_poses_ = msg->poses;
 
             this->received_path_ = true;
         }
@@ -109,11 +124,15 @@ namespace ee3305
         // Odometry subscriber callback
         void callbackSubOdom_(nav_msgs::msg::Odometry::SharedPtr msg)
         {
-            // !TODO: write robot pose to rbt_x_, rbt_y_, rbt_yaw_
+            // write robot pose to rbt_x_, rbt_y_, rbt_yaw_
             this->rbt_x_ = msg->pose.pose.position.x;
-            
+            this->rbt_y_ = msg->pose.pose.position.y;
+
+            // convert the quaternion to the yaw heading (the roll and pitch are not needed).
             const auto &q = msg->pose.pose.orientation;
-            this->rbt_yaw_ = q.w;
+            double siny_cosp = 2 * (q.w * q.z + q.x * q.y);
+            double cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z);
+            this->rbt_yaw_ = std::atan2(siny_cosp, cosy_cosp);
 
             this->received_odom_ = true;
         }

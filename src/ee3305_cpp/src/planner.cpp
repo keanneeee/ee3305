@@ -93,10 +93,17 @@ namespace ee3305
                 qos_profile_latch, // latching qos. Only one message is published, and at the start of launch.
                 std::bind(&Planner::callbackSubGlobalCostmap_, this, std::placeholders::_1));
 
-            // !TODO: Path request subscriber
+            // Path request subscriber
+            this->sub_path_request_ = this->create_subscription<nav_msgs::msg::Path>(
+                "path_request",
+                10,
+                std::bind(&Planner::callbackSubPathRequest_, this, std::placeholders::_1));
 
             // Handles: Publishers
-            // !TODO: Path publisher
+            // Path publisher
+            this->pub_path_ = this->create_publisher<nav_msgs::msg::Path>(
+                "path",
+                10);
 
             // Timers:
             this->timer_ = this->create_timer(
@@ -114,8 +121,12 @@ namespace ee3305
         // Path request subscriber callback
         void callbackSubPathRequest_(nav_msgs::msg::Path::SharedPtr msg)
         {
-            // !TODO: write to rbt_x_, rbt_y_, goal_x_, goal_y_
-            this->rbt_x_ = msg->poses[1].pose.orientation.x;
+            // write to rbt_x_, rbt_y_, goal_x_, goal_y_.
+            // The behavior node writes the robot coordinates at [0] and the goal coordinates at [1].
+            this->rbt_x_ = msg->poses[0].pose.position.x;
+            this->rbt_y_ = msg->poses[0].pose.position.y;
+            this->goal_x_ = msg->poses[1].pose.position.x;
+            this->goal_y_ = msg->poses[1].pose.position.y;
 
             this->has_new_request_ = true;
         }
@@ -124,7 +135,12 @@ namespace ee3305
         // This is only run once because the costmap is only published once, at the start of the launch.
         void callbackSubGlobalCostmap_(nav_msgs::msg::OccupancyGrid::SharedPtr msg)
         {
-            // !TODO: write to costmap_, costmap_resolution_, costmap_origin_x_, costmap_origin_y_, costmap_rows_, costmap_cols_
+            // write to costmap_, costmap_resolution_, costmap_origin_x_, costmap_origin_y_, costmap_rows_, costmap_cols_
+            this->costmap_ = msg->data;
+            this->costmap_resolution_ = msg->info.resolution;
+            this->costmap_origin_x_ = msg->info.origin.position.x;
+            this->costmap_origin_y_ = msg->info.origin.position.y;
+            this->costmap_rows_ = msg->info.height;
             this->costmap_cols_ = msg->info.width;
 
             this->received_map_ = true;

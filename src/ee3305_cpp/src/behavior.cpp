@@ -55,12 +55,23 @@ namespace ee3305
             this->plan_frequency_ = this->get_parameter("plan_frequency").get_value<double>();
 
             // Handles: Topic Subscribers
-            // !TODO: Goal pose subscriber
+            // Goal pose subscriber
+            this->sub_goal_pose_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
+                "goal_pose",
+                10,
+                std::bind(&Behavior::callbackSubGoalPose_, this, std::placeholders::_1));
 
-            // !TODO: Odometry subscriber
+            // Odometry subscriber
+            this->sub_odom_ = this->create_subscription<nav_msgs::msg::Odometry>(
+                "odom",
+                10,
+                std::bind(&Behavior::callbackSubOdom_, this, std::placeholders::_1));
 
             // Handles: Topic Publishers
-            // !TODO: Path request publisher
+            // Path request publisher
+            this->pub_path_request_ = this->create_publisher<nav_msgs::msg::Path>(
+                "path_request",
+                10);
 
             // Handles: Timers
             this->timer_ = this->create_timer(
@@ -84,8 +95,9 @@ namespace ee3305
             this->received_goal_coords_ = true;
             this->goal_reached_ = true; // "cancel" the goal and trigger the if condition in timer.
 
-            // !TODO: Copy to goal_x_, goal_y_.
+            // Copy to goal_x_, goal_y_.
             this->goal_x_ = msg->pose.position.x;
+            this->goal_y_ = msg->pose.position.y;
 
             RCLCPP_INFO(this->get_logger(),
                         "Received New Goal @ (%7.3f, %7.3f).",
@@ -97,8 +109,9 @@ namespace ee3305
         {
             this->received_rbt_coords_ = true;
 
-            // !TODO: Copy to rbt_x_, rbt_y_.
-            this->rbt_x_ = msg->pose.pose.orientation.y;
+            // Copy to rbt_x_, rbt_y_. The orientation is not needed in this node.
+            this->rbt_x_ = msg->pose.pose.position.x;
+            this->rbt_y_ = msg->pose.pose.position.y;
         }
 
         // Callback for timer.
@@ -143,14 +156,19 @@ namespace ee3305
             msg_path_request.header.stamp = this->get_clock()->now();
             msg_path_request.header.frame_id = "map";
 
-            // !TODO: write the robot coordinates
+            // write the robot coordinates
             geometry_msgs::msg::PoseStamped rbt_pose;
-            rbt_pose.pose.position.x = 0.0;
+            rbt_pose.pose.position.x = this->rbt_x_;
+            rbt_pose.pose.position.y = this->rbt_y_;
 
-            // !TODO: write the goal coordinates
+            // write the goal coordinates
+            geometry_msgs::msg::PoseStamped goal_pose;
+            goal_pose.pose.position.x = this->goal_x_;
+            goal_pose.pose.position.y = this->goal_y_;
 
-            // !TODO: fill up the array containing the robot coordinates at [0] and goal coordinates at [1]
+            // fill up the array containing the robot coordinates at [0] and goal coordinates at [1]
             msg_path_request.poses.push_back(rbt_pose);
+            msg_path_request.poses.push_back(goal_pose);
 
             // Publish the message
             RCLCPP_INFO(this->get_logger(),
