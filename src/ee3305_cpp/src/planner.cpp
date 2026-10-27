@@ -3,6 +3,10 @@
 #include <memory>
 #include <chrono>
 #include <vector>
+#include <queue>
+#include <algorithm>
+#include <cmath>
+#include <limits>
 
 #include "rclcpp/rclcpp.hpp"
 #include "nav_msgs/msg/occupancy_grid.hpp"
@@ -58,8 +62,8 @@ namespace ee3305
         double costmap_resolution_;   // read only; written only by subscriber(s)
         double costmap_origin_x_;     // read only; written only by subscriber(s)
         double costmap_origin_y_;     // read only; written only by subscriber(s)
-        double costmap_rows_;         // read only; written only by subscriber(s)
-        double costmap_cols_;         // read only; written only by subscriber(s)
+        int costmap_rows_;            // read only; written only by subscriber(s)
+        int costmap_cols_;            // read only; written only by subscriber(s)
         double rbt_x_;                // read only; written only by subscriber(s)
         double rbt_y_;                // read only; written only by subscriber(s)
         double goal_x_;               // read only; written only by subscriber(s)
@@ -121,6 +125,11 @@ namespace ee3305
         // Path request subscriber callback
         void callbackSubPathRequest_(nav_msgs::msg::Path::SharedPtr msg)
         {
+            if (msg->poses.size() < 2)
+            {
+                RCLCPP_WARN(this->get_logger(), "Path request must contain start and goal poses.");
+                return;
+            }
             // write to rbt_x_, rbt_y_, goal_x_, goal_y_.
             // The behavior node writes the robot coordinates at [0] and the goal coordinates at [1].
             this->rbt_x_ = msg->poses[0].pose.position.x;
@@ -198,16 +207,16 @@ namespace ee3305
         // Converts world coordinates to cell column and cell row.
         std::pair<int, int> XYToCR_(double x, double y)
         {
-            int c = 0 * x;
-            int r = 0 * y;
+            int c = static_cast<int>(std::floor((x - costmap_origin_x_) / costmap_resolution_));
+            int r = static_cast<int>(std::floor((y - costmap_origin_y_) / costmap_resolution_));
             return {c, r};
         }
 
         // Converts cell column and cell row to world coordinates.
         std::pair<double, double> CRToXY_(int c, int r)
         {
-            double x = 0.0 * c;
-            double y = 0.0 * r;
+            double x = costmap_origin_x_ + (c + 0.5) * costmap_resolution_;
+            double y = costmap_origin_y_ + (r + 0.5) * costmap_resolution_;
 
             return {x, y};
         }
@@ -215,32 +224,40 @@ namespace ee3305
         // Converts cell column and cell row to flattened array index.
         int CRToIndex_(int c, int r)
         {
-            return 0 * r * c;
+            return r * costmap_cols_ + c;
         }
 
         // Returns true if the cell column and cell row is outside the costmap.
         bool outOfMap_(int c, int r)
         {
-            return c < r && false;
+            return c < 0 || r < 0 || c >= costmap_cols_ || r >= costmap_rows_;
         }
 
         // Runs the path planning algorithm based on the world coordinates.
         void dijkstra_(double start_x, double start_y, double goal_x, double goal_y)
         {
-            // Delete both lines when ready to code planner.py -----------------
-            this->publishInterpolatedPath(start_x, start_y, goal_x, goal_y);
-            return;
-
             // Initializations ---------------------------------
+            if (costmap_cols_ <= 0 || costmap_rows_ <= 0 || costmap_resolution_ <= 0.0)
+                return;
 
-            // nodes
-            std::vector<DijkstraNode> nodes = {DijkstraNode(0, 0)};
+            std::vector<DijkstraNode> nodes;
+            nodes.reserve(static_cast<size_t>(costmap_rows_) * costmap_cols_);
+            for (int r = 0; r < costmap_rows_; ++r)
+                for (int c = 0; c < costmap_cols_; ++c)
+                    nodes.emplace_back(c, r);
 
-            // initialize start and goal
             auto [rbt_c, rbt_r] = this->XYToCR_(start_x, start_y);
-            auto [goal_c, goal_r] = std::make_pair<int, int>(1, 1);
+            auto [goal_c, goal_r] = this->XYToCR_(goal_x, goal_y);
+            if (outOfMap_(rbt_c, rbt_r) || outOfMap_(goal_c, goal_r))
+            {
+                RCLCPP_WARN(this->get_logger(), "Start or goal is outside the costmap.");
+                return;
+            }
             int rbt_idx = this->CRToIndex_(rbt_c, rbt_r);
+            int goal_idx = this->CRToIndex_(goal_c, goal_r);
             DijkstraNode *start_node = &nodes[rbt_idx];
+            start_node->g = 0.0;
+            start_node->f = 0.0;
 
             // open list
             OpenList<DijkstraNode *> open_list;
@@ -253,7 +270,9 @@ namespace ee3305
                 DijkstraNode *node = open_list.top();
                 open_list.pop();
 
-                // Skip if visited
+                if (node->expanded)
+                    continue;
+                node->expanded = true;
 
                 // Return path if reached goal
                 if (node->c == goal_c && node->r == goal_r)
@@ -262,7 +281,19 @@ namespace ee3305
                     msg_path.header.stamp = this->get_clock()->now();
                     msg_path.header.frame_id = "map";
 
-                    // obtain the path from the nodes
+                    std::vector<geometry_msgs::msg::PoseStamped> reverse_path;
+                    for (DijkstraNode *current = node; current != nullptr; current = current->parent)
+                    {
+                        auto [x, y] = CRToXY_(current->c, current->r);
+                        geometry_msgs::msg::PoseStamped pose;
+                        pose.header = msg_path.header;
+                        pose.pose.position.x = x;
+                        pose.pose.position.y = y;
+                        pose.pose.orientation.w = 1.0;
+                        reverse_path.push_back(pose);
+                    }
+                    std::reverse(reverse_path.begin(), reverse_path.end());
+                    msg_path.poses = std::move(reverse_path);
 
                     // publish path
                     this->pub_path_->publish(msg_path);
@@ -277,25 +308,39 @@ namespace ee3305
                 // Neighbor Loop --------------------------------------------------
                 for (auto [dc, dr] : std::vector<std::pair<int, int>>{{1, 0}, {1, 1}, {0, 1}, {-1, 1}, {-1, 0}, {-1, -1}, {0, -1}, {1, -1}})
                 {
-                    // Get neighbor coordinates and neighbor
-                    int nb_c = dc;
-                    int nb_r = dr;
-                    int nb_idx = 0 * nb_c * nb_r;
+                    int nb_c = node->c + dc;
+                    int nb_r = node->r + dr;
 
-                    // Continue if out of map
+                    if (outOfMap_(nb_c, nb_r))
+                        continue;
+                    int nb_idx = CRToIndex_(nb_c, nb_r);
+                    if (costmap_[nb_idx] < 0 || costmap_[nb_idx] > max_access_cost_)
+                        continue;
 
                     // Extract pointer to neighboring node
                     DijkstraNode *nb_node = &nodes[nb_idx];
 
-                    // Continue if neighbor is expanded
+                    if (nb_node->expanded)
+                        continue;
 
                     // Ignore if the cell cost exceeds max_access_cost_ (to avoid passing through obstacles)
 
-                    // Get the relative g-cost and push to open-list if cheaper to get from parent
-                    nb_node->g = 0.0;
+                    const double distance = (dc != 0 && dr != 0) ? std::sqrt(2.0) : 1.0;
+                    const double new_g = node->g + distance * (static_cast<double>(costmap_[nb_idx]) + 1.0);
+                    if (new_g < nb_node->g)
+                    {
+                        nb_node->parent = node;
+                        nb_node->g = new_g;
+                        nb_node->f = new_g;
+                        open_list.push(nb_node);
+                    }
                 }
             }
-            RCLCPP_WARN(this->get_logger(), "No Path Found!"); // should publish an empty path.
+            nav_msgs::msg::Path empty_path;
+            empty_path.header.stamp = this->get_clock()->now();
+            empty_path.header.frame_id = "map";
+            this->pub_path_->publish(empty_path);
+            RCLCPP_WARN(this->get_logger(), "No Path Found!");
         }
     };
 }

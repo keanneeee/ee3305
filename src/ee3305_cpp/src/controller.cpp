@@ -4,6 +4,8 @@
 #include <chrono>
 #include <vector>
 #include <cmath>
+#include <algorithm>
+#include <limits>
 
 #include "rclcpp/rclcpp.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
@@ -141,11 +143,31 @@ namespace ee3305
         // Make sure path and robot positions are already received, and the path contains at least one point.
         std::pair<double, double> getLookaheadPoint_()
         {
-            // Find the point along the path that is closest to the robot
+            size_t closest_idx = 0;
+            double closest_dist = std::numeric_limits<double>::max();
+            for (size_t i = 0; i < this->path_poses_.size(); ++i)
+            {
+                const double dx = path_poses_[i].pose.position.x - rbt_x_;
+                const double dy = path_poses_[i].pose.position.y - rbt_y_;
+                const double d2 = dx * dx + dy * dy;
+                if (d2 < closest_dist)
+                {
+                    closest_dist = d2;
+                    closest_idx = i;
+                }
+            }
 
-            // From the closest point, iterate towards the goal and find the first point that is at least a lookahead distance away.
-            // Return the goal point if no such lookahead point can be found
-            size_t lookahead_idx = this->path_poses_.size() - 1;
+            size_t lookahead_idx = path_poses_.size() - 1;
+            for (size_t i = closest_idx; i < path_poses_.size(); ++i)
+            {
+                const double dx = path_poses_[i].pose.position.x - rbt_x_;
+                const double dy = path_poses_[i].pose.position.y - rbt_y_;
+                if (std::hypot(dx, dy) >= lookahead_distance_)
+                {
+                    lookahead_idx = i;
+                    break;
+                }
+            }
 
             // Get the lookahead coordinates
             geometry_msgs::msg::PoseStamped lookahead_pose = this->path_poses_[lookahead_idx];
@@ -174,24 +196,36 @@ namespace ee3305
             // get lookahead point
             auto [lookahead_x, lookahead_y] = this->getLookaheadPoint_();
 
-            // get distance to lookahead point (not to be confused with lookahead_distance)
+            const double dx = lookahead_x - rbt_x_;
+            const double dy = lookahead_y - rbt_y_;
+            const double distance = std::hypot(dx, dy);
 
-            // stop the robot if close to the point.
-
-            // get curvature
-
-            // calculate velocities
-            double lin_vel = 0.0;
-            double ang_vel = 0.0 * lookahead_x * lookahead_y;
-
-            // saturate velocities. The following can result in the wrong curvature,
-            // but only when the robot is travelling too fast (which should not occur if well tuned).
-            lin_vel = 0.0; 
-            ang_vel = 0.0; 
-
-            // publish velocities
             geometry_msgs::msg::TwistStamped msg_cmd_vel;
             msg_cmd_vel.header.stamp = this->get_clock()->now();
+
+            // Stop when the robot is sufficiently close to the final path point.
+            if (distance <= stop_thres_)
+            {
+                msg_cmd_vel.twist.linear.x = 0.0;
+                msg_cmd_vel.twist.angular.z = 0.0;
+                this->pub_cmd_vel_->publish(msg_cmd_vel);
+                return;
+            }
+
+            // Transform the lookahead point into the robot frame.
+            // In this frame, x is forward and y is to the robot's left.
+            const double x_robot = std::cos(rbt_yaw_) * dx + std::sin(rbt_yaw_) * dy;
+            const double y_robot = -std::sin(rbt_yaw_) * dx + std::cos(rbt_yaw_) * dy;
+
+            double lin_vel = 0.0;
+            double ang_vel = 0.0;
+
+            const double curvature = 2.0 * y_robot /
+                                     std::max(distance * distance, 1e-6);
+            lin_vel = std::clamp(lookahead_lin_vel_, 0.0, max_lin_vel_);
+            ang_vel = std::clamp(curvature * lin_vel, -max_ang_vel_, max_ang_vel_);
+
+            // publish velocities
             msg_cmd_vel.twist.linear.x = lin_vel;
             msg_cmd_vel.twist.angular.z = ang_vel;
             this->pub_cmd_vel_->publish(msg_cmd_vel);
